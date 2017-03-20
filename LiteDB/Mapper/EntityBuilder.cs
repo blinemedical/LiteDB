@@ -17,7 +17,40 @@ namespace LiteDB
         internal EntityBuilder(BsonMapper mapper)
         {
             _mapper = mapper;
-            _entity = mapper.GetEntityMapper(typeof(T));
+            _entity = mapper.GetEntityMapper(typeof(T), true);
+        }
+
+        /// <summary>
+        /// Automatically map an entity with default settings
+        /// </summary>
+        /// <returns></returns>
+        public EntityBuilder<T> AutoMap()
+        {
+            _entity = _mapper.BuildEntityMapper(typeof(T));
+            return this;
+        }
+
+        /// <summary>
+        /// Include a property for serialization
+        /// </summary>
+        /// <returns></returns>
+        public EntityBuilder<T> Include<K>(Expression<Func<T, K>> property)
+        {
+            MemberExpression memberExpression = (property.Body as MemberExpression);
+            if (memberExpression == null)
+            {
+                throw new Exception("Illegal expression in Include() " + property.GetPath());
+            }
+            MemberMapper mapped = _mapper.MapMember(_entity, typeof(T),memberExpression.Member,false);
+            if (_entity.Members.Any(m => m.FieldName == mapped.FieldName))
+            {
+                throw new Exception("Attempted to map duplicate member: " + mapped.FieldName);
+            }
+
+            _entity.Members.Add(mapped);
+
+            return this;
+
         }
 
         /// <summary>
@@ -117,13 +150,17 @@ namespace LiteDB
         /// <summary>
         /// Get a property based on a expression. Eg.: 'x => x.UserId' return string "UserId"
         /// </summary>
-        private EntityBuilder<T> GetProperty<TK, K>(Expression<Func<TK, K>> property, Action<MemberMapper> action)
+        private EntityBuilder<T> GetProperty<K>(Expression<Func<T, K>> property, Action<MemberMapper> action)
         {
             if (property == null) throw new ArgumentNullException("property");
 
             var prop = _entity.GetMember(property);
 
-            if (prop == null) throw new ArgumentNullException(property.GetPath());
+            if (prop == null)
+            {
+                Include(property);
+                prop = _entity.GetMember(property);
+            }
 
             action(prop);
 

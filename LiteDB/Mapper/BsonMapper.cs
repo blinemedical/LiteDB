@@ -83,6 +83,16 @@ namespace LiteDB
         public bool IncludeNonPublic { get; set; }
 
         /// <summary>
+        /// No properties are mapped by default on any entity
+        /// </summary>
+        public bool WhitelistProperties { get; set; }
+
+        /// <summary>
+        /// No entities are automapped
+        /// </summary>
+        public bool WhitelistClasses { get; set; }
+
+        /// <summary>
         /// A custom callback to change MemberInfo behavior when converting to MemberMapper.
         /// Use mapper.ResolveMember(Type entity, MemberInfo property, MemberMapper documentMappedField)
         /// Set FieldName to null if you want remove from mapped document
@@ -276,18 +286,29 @@ namespace LiteDB
         /// <summary>
         /// Get property mapper between typed .NET class and BsonDocument - Cache results
         /// </summary>
-        internal EntityMapper GetEntityMapper(Type type)
+        internal EntityMapper GetEntityMapper(Type type, bool forceRegister = false)
         {
             //TODO: needs check if Type if BsonDocument? Returns empty EntityMapper?
             EntityMapper mapper;
 
             if (!_entities.TryGetValue(type, out mapper))
             {
+                if (!forceRegister && WhitelistClasses)
+                {
+                    throw new Exception(string.Format("Attempted to serialize unregistered class '{0}' when WhitelistClasses is true", type.Name));
+                }
+
                 lock (_entities)
                 {
                     if (!_entities.TryGetValue(type, out mapper))
                     {
-                        return _entities[type] = BuildEntityMapper(type);
+                        return _entities[type] = (WhitelistProperties && forceRegister) ?
+                                         new EntityMapper
+                                         {
+                                             Members = new List<MemberMapper>(),
+                                             ForType = type
+                                         }
+                        : BuildEntityMapper(type);
                     }
                 }
             }
@@ -295,11 +316,17 @@ namespace LiteDB
             return mapper;
         }
 
+        private static readonly Type _idAttr = typeof(BsonIdAttribute);
+        private static readonly Type _ignoreAttr = typeof(BsonIgnoreAttribute);
+        private static readonly Type _fieldAttr = typeof(BsonFieldAttribute);
+        private static readonly Type _indexAttr = typeof(BsonIndexAttribute);
+        private static readonly Type _dbrefAttr = typeof(BsonRefAttribute);
+
         /// <summary>
         /// Use this method to override how your class can be, by default, mapped from entity to Bson document.
         /// Returns an EntityMapper from each requested Type
         /// </summary>
-        protected virtual EntityMapper BuildEntityMapper(Type type)
+        public virtual EntityMapper BuildEntityMapper(Type type)
         {
             var mapper = new EntityMapper
             {
@@ -307,95 +334,100 @@ namespace LiteDB
                 ForType = type
             };
 
-            var idAttr = typeof(BsonIdAttribute);
-            var ignoreAttr = typeof(BsonIgnoreAttribute);
-            var fieldAttr = typeof(BsonFieldAttribute);
-            var indexAttr = typeof(BsonIndexAttribute);
-            var dbrefAttr = typeof(BsonRefAttribute);
+
 
             var members = this.GetTypeMembers(type);
             var id = this.GetIdMember(members);
 
             foreach (var memberInfo in members)
             {
-                // checks [BsonIgnore]
-                if (memberInfo.IsDefined(ignoreAttr, true)) continue;
-
-                // checks field name conversion
-                var name = this.ResolveFieldName(memberInfo.Name);
-
-                // check if property has [BsonField]
-                var field = (BsonFieldAttribute)memberInfo.GetCustomAttributes(fieldAttr, false).FirstOrDefault();
-
-                // check if property has [BsonField] with a custom field name
-                if (field != null && field.Name != null)
+                if (memberInfo.IsDefined(_ignoreAttr, true))
                 {
-                    name = field.Name;
+                    continue;
                 }
 
-                // checks if memberInfo is id field
-                if (memberInfo == id)
-                {
-                    name = "_id";
-                }
+                MemberMapper member = MapMember(mapper, type, memberInfo, id == memberInfo);
 
-                // test if field name is OK (avoid to check in all instances) - do not test internal classes, like DbRef
-                if (BsonDocument.IsValidFieldName(name) == false) throw LiteException.InvalidFormat(memberInfo.Name, name);
-
-                // create getter/setter function
-                var getter = Reflection.CreateGenericGetter(type, memberInfo);
-                var setter = Reflection.CreateGenericSetter(type, memberInfo);
-
-                // check if property has [BsonId] to get with was setted AutoId = true
-                var autoId = (BsonIdAttribute)memberInfo.GetCustomAttributes(idAttr, false).FirstOrDefault();
-
-                // checks if this property has [BsonIndex]
-                var index = (BsonIndexAttribute)memberInfo.GetCustomAttributes(indexAttr, false).FirstOrDefault();
-
-                // get data type
-                var dataType = memberInfo is PropertyInfo ?
-                    (memberInfo as PropertyInfo).PropertyType :
-                    (memberInfo as FieldInfo).FieldType;
-
-                // check if datatype is list/array
-                var isList = Reflection.IsList(dataType);
-
-                // create a property mapper
-                var member = new MemberMapper
-                {
-                    AutoId = autoId == null ? true : autoId.AutoId,
-                    FieldName = name,
-                    MemberName = memberInfo.Name,
-                    DataType = dataType,
-                    IsUnique = index == null ? false : index.Unique,
-                    IsList = isList,
-                    UnderlyingType = isList ? Reflection.GetListItemType(dataType) : dataType,
-                    Getter = getter,
-                    Setter = setter
-                };
-
-                // check if property has [BsonRef]
-                var dbRef = (BsonRefAttribute)memberInfo.GetCustomAttributes(dbrefAttr, false).FirstOrDefault();
-
-                if (dbRef != null && memberInfo is PropertyInfo)
-                {
-                    BsonMapper.RegisterDbRef(this, member, dbRef.Collection ?? this.ResolveCollectionName((memberInfo as PropertyInfo).PropertyType));
-                }
-
-                // support callback to user modify member mapper
-                if (this.ResolveMember != null)
-                {
-                    this.ResolveMember(type, memberInfo, member);
-                }
-
-                // test if has name and there is no duplicate field
-                if (member.FieldName != null && mapper.Members.Any(x => x.FieldName == name) == false)
+                    // test if has name and there is no duplicate field
+                    if (member.FieldName != null && mapper.Members.Any(x => x.FieldName == member.FieldName) == false)
                 {
                     mapper.Members.Add(member);
                 }
             }
 
             return mapper;
+        }
+
+        public virtual MemberMapper MapMember(EntityMapper mapper, Type type, MemberInfo memberInfo, bool isIdMember)
+        {
+            // checks field name conversion
+            var name = this.ResolveFieldName(memberInfo.Name);
+
+            // check if property has [BsonField]
+            var field = (BsonFieldAttribute)memberInfo.GetCustomAttributes(_fieldAttr, false).FirstOrDefault();
+
+            // check if property has [BsonField] with a custom field name
+            if (field != null && field.Name != null)
+            {
+                name = field.Name;
+            }
+
+            // checks if memberInfo is id field
+            if (isIdMember)
+            {
+                name = "_id";
+            }
+
+            // test if field name is OK (avoid to check in all instances) - do not test internal classes, like DbRef
+            if (BsonDocument.IsValidFieldName(name) == false) throw LiteException.InvalidFormat(memberInfo.Name, name);
+
+            // create getter/setter function
+            var getter = Reflection.CreateGenericGetter(type, memberInfo);
+            var setter = Reflection.CreateGenericSetter(type, memberInfo);
+
+            // check if property has [BsonId] to get with was setted AutoId = true
+            var autoId = (BsonIdAttribute)memberInfo.GetCustomAttributes(_idAttr, false).FirstOrDefault();
+
+            // checks if this property has [BsonIndex]
+            var index = (BsonIndexAttribute)memberInfo.GetCustomAttributes(_indexAttr, false).FirstOrDefault();
+
+            // get data type
+            var dataType = memberInfo is PropertyInfo ?
+                (memberInfo as PropertyInfo).PropertyType :
+                (memberInfo as FieldInfo).FieldType;
+
+            // check if datatype is list/array
+            var isList = Reflection.IsList(dataType);
+
+            // create a property mapper
+            var member = new MemberMapper
+            {
+                AutoId = autoId == null || autoId.AutoId,
+                FieldName = name,
+                MemberName = memberInfo.Name,
+                DataType = dataType,
+                IsUnique = index != null && index.Unique,
+                IsList = isList,
+                UnderlyingType = isList ? Reflection.GetListItemType(dataType) : dataType,
+                Getter = getter,
+                Setter = setter
+            };
+
+            // check if property has [BsonRef]
+            var dbRef = (BsonRefAttribute)memberInfo.GetCustomAttributes(_dbrefAttr, false).FirstOrDefault();
+
+            if (dbRef != null && memberInfo is PropertyInfo)
+            {
+                BsonMapper.RegisterDbRef(this, member, dbRef.Collection ?? this.ResolveCollectionName((memberInfo as PropertyInfo).PropertyType));
+            }
+
+            // support callback to user modify member mapper
+            if (this.ResolveMember != null)
+            {
+                this.ResolveMember(type, memberInfo, member);
+            }
+
+            return member;
         }
 
         /// <summary>
@@ -427,7 +459,7 @@ namespace LiteDB
 
             members.AddRange(type.GetProperties(flags).Where(x => x.CanRead).Select(x => x as MemberInfo));
 
-            if(this.IncludeFields)
+            if (this.IncludeFields)
             {
                 members.AddRange(type.GetFields(flags).Where(x => !x.Name.EndsWith("k__BackingField") && x.IsStatic == false).Select(x => x as MemberInfo));
             }
