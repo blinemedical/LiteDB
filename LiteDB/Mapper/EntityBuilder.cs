@@ -11,8 +11,8 @@ namespace LiteDB
     /// </summary>
     public class EntityBuilder<T>
     {
-        private BsonMapper _mapper;
-        private EntityMapper _entity;
+        private readonly BsonMapper _mapper;
+        private readonly EntityMapper _entity;
 
         internal EntityBuilder(BsonMapper mapper)
         {
@@ -26,7 +26,7 @@ namespace LiteDB
         /// <returns></returns>
         public EntityBuilder<T> AutoMap()
         {
-            _entity = _mapper.BuildEntityMapper(typeof(T));
+            _mapper.AutoMapEntity(_entity, typeof(T));
             return this;
         }
 

@@ -326,15 +326,13 @@ namespace LiteDB
         /// Use this method to override how your class can be, by default, mapped from entity to Bson document.
         /// Returns an EntityMapper from each requested Type
         /// </summary>
-        public virtual EntityMapper BuildEntityMapper(Type type)
+        public virtual void AutoMapEntity(EntityMapper mapper, Type type)
         {
-            var mapper = new EntityMapper
+            mapper.ForType = type;
+            if (mapper.Members == null)
             {
-                Members = new List<MemberMapper>(),
-                ForType = type
-            };
-
-
+                mapper.Members = new List<MemberMapper>();
+            }
 
             var members = this.GetTypeMembers(type);
             var id = this.GetIdMember(members);
@@ -348,12 +346,20 @@ namespace LiteDB
 
                 MemberMapper member = MapMember(mapper, type, memberInfo, id == memberInfo);
 
-                    // test if has name and there is no duplicate field
-                    if (member.FieldName != null && mapper.Members.Any(x => x.FieldName == member.FieldName) == false)
+                // test if has name and there is no duplicate field
+                if (member.FieldName != null && mapper.Members.Any(x => x.FieldName == member.FieldName) == false)
                 {
                     mapper.Members.Add(member);
                 }
             }
+        }
+
+
+        public EntityMapper BuildEntityMapper(Type type)
+        {
+            var mapper = new EntityMapper();
+
+            AutoMapEntity(mapper, type);
 
             return mapper;
         }
